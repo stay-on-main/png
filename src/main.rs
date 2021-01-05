@@ -18,14 +18,14 @@ struct BitStream<'a> {
 impl <'a> BitStream<'a> {
     fn read(&mut self, bit_count: usize) -> u8 {
         let mut res = 0u8;
-        print!("read: ");
+        //print!("read: ");
 
         for i in 0..bit_count {
             if (self.data[self.current_byte] & self.offset_in_byte) != 0 {
                 res |= 1 << i;
-                print!("1");
+                //print!("1");
             } else {
-                print!("0");
+                //print!("0");
             }
 
             if self.offset_in_byte == 0x80 {
@@ -36,7 +36,7 @@ impl <'a> BitStream<'a> {
             }
         }
 
-        println!();
+        //println!();
         res
     }
 }
@@ -53,15 +53,7 @@ fn deflate(data: &[u8]) {
         current_byte: 0,
         offset_in_byte: 1,
     };
-    /*
-    for _ in 0..8 {
-        if stream.read(1) == 1 {
-            print!("1");
-        } else {
-            print!("0");
-        }
-    }
-    */
+
     if stream.read(1) == 1 {
         println!("The last block");
     }
@@ -104,6 +96,8 @@ fn deflate(data: &[u8]) {
 
     let mut len = 0;
     let mut cmd = 0u16;
+    let mut lit = [Code {code: 0, len: 0}; 280];
+    let mut lit_pos = 0usize;
 
     loop {
         cmd = cmd << 1 | (stream.read(1) as u16);
@@ -114,14 +108,37 @@ fn deflate(data: &[u8]) {
                 println!("found cmd: {}", i);
 
                 match i {
-                    0..=16 => {
-                        println!("found len");
+                    0..=15 => {
+                        lit[lit_pos].len = i;
+                        lit_pos += 1;
+                    },
+                    16 => {
+
+                        let count = match stream.read(2) {
+                            0b00 => 3,
+                            0b11 => 6,
+                            _ => panic!(),
+                        };
+                        
+                        for _ in 0..count {
+                            lit[lit_pos].len = lit[lit_pos - 1].len;
+                            lit_pos += 1;
+                        }
                     },
                     17 => {
-                        let _ = stream.read(3);
+                        let count = stream.read(3) + 3;
+                        for _ in 0..count {
+                            lit[lit_pos].len = 0;
+                            lit_pos += 1;
+                        }
                     },
                     18 => {
-                        let _ = stream.read(7);
+                        let count = stream.read(7) + 11;
+                        
+                        for _ in 0..count {
+                            lit[lit_pos].len = 0;
+                            lit_pos += 1;
+                        }
                     }
                     _ => {
                         panic!();
@@ -129,29 +146,30 @@ fn deflate(data: &[u8]) {
                 }
                 cmd = 0;
                 len = 0;
+                //println!("lit_pos: {}", lit_pos);
                 break;
             }
         }
-    }
-    /*
-    for i in 0..cmd_code_len.len() {
-        if alp_len[i].len != 0 {
-            print!("{}:", i);
 
-            for x in 0..alp_len[i].len {
-                if alp_len[i].code & (1 << (alp_len[i].len - 1 - x)) != 0 {
-                    print!("1");
-                } else {
-                    print!("0");
-                }
-            }
-
-            println!();
+        if lit_pos >= (hlit + hdist) {
+            break;
         }
     }
 
+    let mut code = 0u16;
+
+    for i in 2..16 {
+        for x in 0..(hlit + hdist) {
+            if lit[x].len == i {
+                lit[x].code = code;
+                code += 1;
+            }
+        }
+
+        code = code << 1;
+    }
+
     println!();
-    */
 }
 
 fn main() {
