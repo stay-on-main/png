@@ -5,6 +5,9 @@
 // https://tools.ietf.org/html/rfc1951
 // https://gchq.github.io/CyberChef/#recipe=Raw_Deflate('Dynamic%20Huffman%20Coding')To_Hex('Space',0)&input=SSBzYXcgeW91IGRhbmNpbmcgaW4gYSBjcm93ZGVkIHJvb20KWW91IGxvb2sgc28gaGFwcHkgd2hlbiBJJ20gbm90IHdpdGggeW91CkJ1dCB0aGVuIHlvdSBzYXcgbWUsIGNhdWdodCB5b3UgYnkgc3VycHJpc2UKQSBzaW5nbGUgdGVhcmRyb3AgZmFsbGluZyBmcm9tIHlvdXIgZXll
 
+const CODE_MAX_LEN: usize = 15;
+const END_OF_DATA: u16 = 256;
+
 struct BitStream<'a> {
     data: &'a [u8],
     current_byte: usize,
@@ -17,10 +20,21 @@ impl <'a> BitStream<'a> {
         self.order = set;
     }
 
+    fn skip_bits_to_byte_border(&mut self) {
+        while self.offset_in_byte != 1 {
+            if self.offset_in_byte == 0x80 {
+                self.offset_in_byte = 1;
+                self.current_byte += 1;
+            } else {
+                self.offset_in_byte <<= 1;
+            }
+        }
+    }
+
     fn read(&mut self, bit_count: usize) -> u16 {
         let mut res = 0u16;
         //print!("read: ");
-        if self.order == false {
+        if !self.order {
             for i in 0..bit_count {
                 if (self.data[self.current_byte] & self.offset_in_byte) != 0 {
                     res |= 1 << i;
@@ -160,9 +174,9 @@ fn static_huffman_decode(stream: &mut BitStream, output: &mut [u8], output_pos: 
         let cmd = stream.read(7);
         // 256-279  -- 7 бит, от 0000000 до 0010111
         if cmd <= 0b0010111 {
-            let code = 256 + cmd;
+            let code = END_OF_DATA + cmd;
 
-            if code == 256 {
+            if code == END_OF_DATA {
                 // end of block!;
                 return Some(current_pos - output_pos);
             }
@@ -211,13 +225,6 @@ fn static_huffman_decode(stream: &mut BitStream, output: &mut [u8], output_pos: 
     }
 }
 
-#[derive(Clone, Copy)]
-struct Book {
-    count: u8,
-    base_code: u8,
-    first_cmd_index: u8,
-}
-
 struct DictionaryBuilder {
     cmd_len: [u8; 289],
 
@@ -232,7 +239,7 @@ impl DictionaryBuilder {
             cmd_len: [0u8; 289],
             len_count: [0; 16],
             position: 0,
-            size: size,
+            size,
         }
     }
 
@@ -244,7 +251,7 @@ impl DictionaryBuilder {
         self.len_count[len as usize] += 1;
         self.cmd_len[self.position] = len;
         self.position += 1;
-        return true;
+        true
     }
 
     fn put_last(&mut self) -> bool {
@@ -257,7 +264,6 @@ impl DictionaryBuilder {
 
     fn build_dictionary(mut self) -> Dictionary {
         let mut len = [HuffmanLen {count: 0, base_code: 0, first_cmd_index: 0}; 16];
-        println!("build dictionary");
         let mut code = 0u16;
         self.len_count[0] = 0;
     
@@ -266,10 +272,6 @@ impl DictionaryBuilder {
             code = (code + self.len_count[i - 1] as u16) << 1;
             len[i].base_code = code;
             len[i].first_cmd_index = len[i - 1].first_cmd_index + len[i - 1].count;
-            
-            if len[i].count != 0 {
-                println!("for len: {}, base code: {:b}", i, code);
-            }
         }
 
         let mut ordered_cmd = [0u16; 289];
@@ -331,7 +333,7 @@ impl Dictionary {
                 return Some(x);
             }
 
-            if len >= 16 {
+            if len > CODE_MAX_LEN as u16 {
                 return None;
             }
         }
@@ -340,106 +342,63 @@ impl Dictionary {
 
 fn dynamic_huffman_decode(stream: &mut BitStream, output: &mut [u8]) -> Option<usize> {
     let hlit = stream.read(5) as usize + 257;
-    println!("hlit: {}", hlit);
-
     let hdist = stream.read(5) as usize + 1;
-    println!("hdist: {}", hdist);
-
     let hclen = stream.read(4) as usize + 4;
-    println!("hclen: {}", hclen);
 
-    let mut xxx = [Book {count: 0, base_code: 0, first_cmd_index: 0}; 16];
     let mut cmd_len = [0u8; 19];
     let cmd_order: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
     
     for i in 0..hclen {
-        let len = stream.read(3) as usize;
-        xxx[len].count += 1;
-        cmd_len[cmd_order[i]] = len as u8;
+        cmd_len[cmd_order[i]] = stream.read(3) as u8;
     }
 
-    let mut code = 0u8;
-    xxx[0].count = 0;
-
-    for i in 1..16 {
-        code = (code + xxx[i - 1].count) << 1;
-        xxx[i].base_code = code;
-        xxx[i].first_cmd_index = xxx[i - 1].first_cmd_index + xxx[i - 1].count;
-        
-        if xxx[i].count != 0 {
-            println!("for len: {}, base code: {:b}", i, code);
-        }
+    let mut zdict = DictionaryBuilder::new(19);
+    
+    for &len in cmd_len.iter() {
+        zdict.put(len);
     }
 
-    let mut offsets = [0u8; 19];
-    let mut cmd = [0u8; 19];
-
-    for i in 0..19 {
-        let len = cmd_len[i] as usize;
-
-        if len != 0 {
-            let offset_in_cmd_table = xxx[len].first_cmd_index + offsets[len];
-            offsets[len] += 1;
-            cmd[offset_in_cmd_table as usize] = i as u8;
-        }
-    }
-
-    let mut cmdd = 0;
-    let mut len = 0;
+    let zdict = zdict.build_dictionary();
     let mut dict = DictionaryBuilder::new(hlit);
     let mut offsets = DictionaryBuilder::new(hdist);
 
-    loop {
-        cmdd = (cmdd << 1) | stream.read(1) as u8;
-        len += 1;
-        let code = &xxx[len];
+    while !dict.is_full() || !offsets.is_full() {
+        let cmd = zdict.find_in_bit_stream(stream).unwrap() as u8;
 
-        if code.count != 0 && cmdd >= code.base_code && cmdd < (code.base_code + code.count) {
-            let f = code.first_cmd_index as usize + cmdd as usize - code.base_code as usize;
-            println!("found: {}", cmd[f]);
-
-            match cmd[f] {
-                0..=15 => {
-                    if dict.put(cmd[f]) == false {
-                        offsets.put(cmd[f]);
-                    }
-                },
-                16 => {
-                    let count = match stream.read(2) {
-                        0b00 => 3,
-                        0b11 => 6,
-                        _ => return None,
-                    };
-                    
-                    for _ in 0..count {
-                        if dict.put_last() == false {
-                            offsets.put_last();
-                        }
-                    }
-                },
-                17 => {
-                    for _ in 0..(stream.read(3) + 3) {
-                        if dict.put(0) == false {
-                            offsets.put(0);
-                        }
-                    }
-                },
-                18 => {
-                    for _ in 0..(stream.read(7) + 11) {
-                        if dict.put(0) == false {
-                            offsets.put(0);
-                        }
+        match cmd {
+            0..=15 => {
+                if !dict.put(cmd) {
+                    offsets.put(cmd);
+                }
+            },
+            16 => {
+                let count = match stream.read(2) {
+                    0b00 => 3,
+                    0b11 => 6,
+                    _ => return None,
+                };
+                
+                for _ in 0..count {
+                    if !dict.put_last() {
+                        offsets.put_last();
                     }
                 }
-                _ => return None,
-            }
-
-            cmdd = 0;
-            len = 0;
-        }
-
-        if dict.is_full() && offsets.is_full() {
-            break;
+            },
+            17 => {
+                for _ in 0..(stream.read(3) + 3) {
+                    if !dict.put(0) {
+                        offsets.put(0);
+                    }
+                }
+            },
+            18 => {
+                for _ in 0..(stream.read(7) + 11) {
+                    if !dict.put(0) {
+                        offsets.put(0);
+                    }
+                }
+            },
+            _ => return None,
         }
     }
 
@@ -448,36 +407,21 @@ fn dynamic_huffman_decode(stream: &mut BitStream, output: &mut [u8]) -> Option<u
     let mut current_pos = 0;
 
     loop {
-        match xdict.find_in_bit_stream(stream) {
-            Some(x) => {
-                if x <= 0xff {
-                    
-                    if x >= b'a' as u16 && x <= b'z' as u16 {
-                        println!("find char: '{}'", x as u8 as char);
-                    } else {
-                        println!("find u8:    {}", x);
-                    }
-                    output[current_pos] = x as u8;
-                    current_pos += 1;
-                } else if x == 256 {
-                    return Some(current_pos);
-                } else {
-                    // we got cmd
-                    let len = huffman_read_length(x, stream);
-                    println!("find len: {}", len);
-                    // 
-                    match xoffsets.find_in_bit_stream(stream) {
-                        Some(offset) => {
-                            let offset = (stream.read(YYY[offset as usize].bits as usize) + YYY[offset as usize].len) as usize;
-                            println!("offset: {}", offset);
-                            
-                            huffman_copy_pair(len, offset, output, &mut current_pos);
-                        },
-                        None => return None,
-                    }
-                }
+        let x = xdict.find_in_bit_stream(stream)?;
+
+        match x {
+            0..=255 => {
+                output[current_pos] = x as u8;
+                current_pos += 1;
             },
-            None => return None,
+            END_OF_DATA => return Some(current_pos),
+            _ => {
+                // we got cmd
+                let len = huffman_read_length(x, stream);
+                let offset = xoffsets.find_in_bit_stream(stream)?;
+                let offset = (stream.read(YYY[offset as usize].bits as usize) + YYY[offset as usize].len) as usize;
+                huffman_copy_pair(len, offset, output, &mut current_pos);
+            },
         }
     }
 }
@@ -496,39 +440,32 @@ fn decode(input: &[u8], output: &mut [u8]) -> Option<usize>
     loop {
         stream.set_static_huffman_bit_order(false);
         let bfinal = stream.read(1);
-        let btype = stream.read(2);
-
-        if btype == 0b00 {
-            // no compression
-            println!("no compression");
-            panic!();
-            /*
-            // skip any remaining bits in current partially processed byte
-            let len = stream.read(16);
-            let nlen = stream.read(16);
-            
-            for i in 0..(len as usize) {
-                output[count] = input[5 + i];
-                count += 1;
+        
+        match stream.read(2) {
+            0b00 => {
+                println!("no compression");
+                stream.skip_bits_to_byte_border();
+                
+                let len = stream.read(16);
+                let _ = stream.read(16); //nlen
+                
+                for i in 0..(len as usize) {
+                    output[count] = input[5 + i];
+                    count += 1;
+                }
+            },
+            0b01 => {
+                println!("compressed with fixed Huffman codes");
+                count += static_huffman_decode(&mut stream, output, count)?;
+            },
+            0b10 => {
+                println!("compressed with dynamic Huffman codes");
+                count += dynamic_huffman_decode(&mut stream, &mut output[count..])?;
+            },
+            _ => {
+                println!("undefined compression type");
+                return None;
             }
-            */
-        } else if btype == 0b01 {
-            println!("compressed with fixed Huffman codes");
-            
-            match static_huffman_decode(&mut stream, output, count) {
-                Some(len) => count += len,
-                None => return None,
-            }
-        } else if btype == 0b10 {
-            println!("compressed with dynamic Huffman codes");
-
-            match dynamic_huffman_decode(&mut stream, &mut output[count..]) {
-                Some(len) => count += len,
-                None => return None,
-            }
-        } else {
-            println!("undefined compression type");
-            return None;
         }
 
         if bfinal == 1 {
@@ -541,15 +478,30 @@ fn decode(input: &[u8], output: &mut [u8]) -> Option<usize>
 
 fn main()
 {
-    let data: [u8; 11] = [0x73, 0x49, 0x4D, 0xCB, 0x49, 0x2C, 0x49, 0x55, 0x00, 0x11, 0x00];
-    
+    //let data: [u8; 11] = [0x73, 0x49, 0x4D, 0xCB, 0x49, 0x2C, 0x49, 0x55, 0x00, 0x11, 0x00];
+    let data = [
+        0xf3, 0xcc, 0x53, 0x28, 0xc9, 0x48, 0x55, 0xc8, 0x49, 0xcc, 
+        0x4b, 0x51, 0xc8, 0x4f, 0x53, 0x70, 0xcf, 0x4f, 0x29, 0x56, 
+        0x00, 0xb1, 0x7d, 0xf3, 0xf3, 0x8a, 0x4b, 0x52, 0x8b, 0x8a, 
+        0xb9, 0x3c, 0x15, 0xca, 0x13, 0x41, 0x42, 0x40, 0x94, 0x9e, 
+        0x9a, 0xc3, 0xe5, 0x93, 0x59, 0x96, 0x99, 0xa7, 0xae, 0x90, 
+        0x09, 0xd1, 0x96, 0x9e, 0x58, 0x94, 0x92, 0x9a, 0x07, 0xd2, 
+        0x98, 0x5a, 0x96, 0x99, 0xc3, 0x15, 0x9c, 0x5c, 0x94, 0x5a, 
+        0x9e, 0x9a, 0xa2, 0x50, 0x5a, 0xa0, 0xa3, 0x50, 0x9c, 0x9c, 
+        0x58, 0x94, 0x9a, 0xa2, 0xa3, 0x90, 0x92, 0x9f, 0x99, 0x97, 
+        0x0e, 0xd4, 0x5c, 0x59, 0x92, 0x01, 0x62, 0x94, 0x64, 0x24, 
+        0x96, 0x28, 0x78, 0x2a, 0xe4, 0xa5, 0xa6, 0xa6, 0xa4, 0xa6, 
+        0x70, 0x05, 0x03, 0xc5, 0x40, 0xc6, 0xe5, 0x64, 0x66, 0xa7, 
+        0x2a, 0x24, 0x2a, 0xa4, 0x65, 0xa6, 0x16, 0x55, 0x2a, 0x24, 
+        0xa5, 0x26, 0x26, 0xe7, 0xe7, 0x01, 0x00];
+
     let mut output = [0u8; 200];
 
     if let Some(len) = decode(&data, &mut output) {
         println!("decoded data len: {}", len);
 
-        for i in 0..len {
-            print!("{}", output[i] as char);
+        for &c in output.iter().take(len) {
+            print!("{}", c as char);
         }
     }
 }
@@ -585,7 +537,7 @@ mod tests {
             all your life\n\
             you were only waiting for this moment to arise\n";
 
-        let encoded: [u8; 101] = [
+        let encoded = [
             0x15, 0x8d, 0x51, 0x0a, 0xc0, 0x20, 0x0c, 0x43, 0xff, 0x3d,
             0x45, 0xae, 0x56, 0x67, 0xdd, 0x8a, 0x5d, 0x0b, 0xd5, 0x21,
             0xde, 0x7e, 0x0a, 0xf9, 0x08, 0x21, 0x2f, 0xc9, 0x4a, 0x57,
@@ -611,7 +563,7 @@ mod tests {
             But then you saw me, caught you by surprise\n\
             A single teardrop falling from your eye";
 
-        let encoded: [u8; 119] = [
+        let encoded = [
             0x1d, 0x8d, 0x31, 0x0e, 0xc3, 0x20, 0x10, 0x04, 0x7b, 0x5e,
             0xb1, 0x5d, 0x9a, 0x7c, 0x22, 0xe9, 0xfc, 0x84, 0x94, 0x17,
             0x73, 0x36, 0x28, 0xc0, 0xa1, 0x03, 0x84, 0xf8, 0xbd, 0x7d,
@@ -634,10 +586,99 @@ mod tests {
     fn static_huffman_0() -> Result<(), String> {
         let original = b"Deflate late";
 
-        let encoded: [u8; 11] = [0x73, 0x49, 0x4D, 0xCB, 0x49, 0x2C, 0x49, 0x55, 0x00, 0x11, 0x00];
+        let encoded = [0x73, 0x49, 0x4D, 0xCB, 0x49, 0x2C, 0x49, 0x55, 0x00, 0x11, 0x00];
 
         let mut output = [0u8; 200];
         decode_and_compare(original, &encoded, &mut output)
     }
 
+    #[test]
+    fn static_huffman_1() -> Result<(), String> {
+        let original = b"\
+            In the land of Gods and Monsters\n\
+            I was an angel\n\
+            Livin' in the garden of evil\n\
+            Screwed up, scared, doing anything that I needed\n\
+            Shinin' like a fiery beacon";
+
+        let encoded = [
+            0xf3, 0xcc, 0x53, 0x28, 0xc9, 0x48, 0x55, 0xc8, 0x49, 0xcc, 
+            0x4b, 0x51, 0xc8, 0x4f, 0x53, 0x70, 0xcf, 0x4f, 0x29, 0x56, 
+            0x00, 0xb1, 0x7d, 0xf3, 0xf3, 0x8a, 0x4b, 0x52, 0x8b, 0x8a, 
+            0xb9, 0x3c, 0x15, 0xca, 0x13, 0x41, 0x42, 0x40, 0x94, 0x9e, 
+            0x9a, 0xc3, 0xe5, 0x93, 0x59, 0x96, 0x99, 0xa7, 0xae, 0x90, 
+            0x09, 0xd1, 0x96, 0x9e, 0x58, 0x94, 0x92, 0x9a, 0x07, 0xd2, 
+            0x98, 0x5a, 0x96, 0x99, 0xc3, 0x15, 0x9c, 0x5c, 0x94, 0x5a, 
+            0x9e, 0x9a, 0xa2, 0x50, 0x5a, 0xa0, 0xa3, 0x50, 0x9c, 0x9c, 
+            0x58, 0x94, 0x9a, 0xa2, 0xa3, 0x90, 0x92, 0x9f, 0x99, 0x97, 
+            0x0e, 0xd4, 0x5c, 0x59, 0x92, 0x01, 0x62, 0x94, 0x64, 0x24, 
+            0x96, 0x28, 0x78, 0x2a, 0xe4, 0xa5, 0xa6, 0xa6, 0xa4, 0xa6, 
+            0x70, 0x05, 0x03, 0xc5, 0x40, 0xc6, 0xe5, 0x64, 0x66, 0xa7, 
+            0x2a, 0x24, 0x2a, 0xa4, 0x65, 0xa6, 0x16, 0x55, 0x2a, 0x24, 
+            0xa5, 0x26, 0x26, 0xe7, 0xe7, 0x01, 0x00];
+
+        let mut output = [0u8; 200];
+        decode_and_compare(original, &encoded, &mut output)
+    }
+
+    #[test]
+    fn no_compression_0() -> Result<(), String> {
+        let original = b"\
+            I'd sit alone and watch your light\n\
+            My only friend through teenage nights\n\
+            And everything I had to know\n\
+            I heard it on my radio";
+
+        let encoded = [
+            0x01, 0x7c, 0x00, 0x83, 0xff, 0x49, 0x27, 0x64, 0x20, 0x73,
+            0x69, 0x74, 0x20, 0x61, 0x6c, 0x6f, 0x6e, 0x65, 0x20, 0x61,
+            0x6e, 0x64, 0x20, 0x77, 0x61, 0x74, 0x63, 0x68, 0x20, 0x79,
+            0x6f, 0x75, 0x72, 0x20, 0x6c, 0x69, 0x67, 0x68, 0x74, 0x0a,
+            0x4d, 0x79, 0x20, 0x6f, 0x6e, 0x6c, 0x79, 0x20, 0x66, 0x72,
+            0x69, 0x65, 0x6e, 0x64, 0x20, 0x74, 0x68, 0x72, 0x6f, 0x75,
+            0x67, 0x68, 0x20, 0x74, 0x65, 0x65, 0x6e, 0x61, 0x67, 0x65,
+            0x20, 0x6e, 0x69, 0x67, 0x68, 0x74, 0x73, 0x0a, 0x41, 0x6e,
+            0x64, 0x20, 0x65, 0x76, 0x65, 0x72, 0x79, 0x74, 0x68, 0x69,
+            0x6e, 0x67, 0x20, 0x49, 0x20, 0x68, 0x61, 0x64, 0x20, 0x74,
+            0x6f, 0x20, 0x6b, 0x6e, 0x6f, 0x77, 0x0a, 0x49, 0x20, 0x68,
+            0x65, 0x61, 0x72, 0x64, 0x20, 0x69, 0x74, 0x20, 0x6f, 0x6e,
+            0x20, 0x6d, 0x79, 0x20, 0x72, 0x61, 0x64, 0x69, 0x6f];
+
+        let mut output = [0u8; 200];
+        decode_and_compare(original, &encoded, &mut output)
+    }
+
+    #[test]
+    fn no_compression_1() -> Result<(), String> {
+        let original = b"\
+            So you think you can stone me and spit in my eye\n\
+            So you think you can love me and leave me to die\n\
+            Oh baby - can't do this to me baby\n\
+            Just gotta get out - just gotta get right outta here";
+
+        let encoded = [
+            0x01, 0xb9, 0x00, 0x46, 0xff, 0x53, 0x6f, 0x20, 0x79, 0x6f,
+            0x75, 0x20, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x20, 0x79, 0x6f,
+            0x75, 0x20, 0x63, 0x61, 0x6e, 0x20, 0x73, 0x74, 0x6f, 0x6e,
+            0x65, 0x20, 0x6d, 0x65, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x73,
+            0x70, 0x69, 0x74, 0x20, 0x69, 0x6e, 0x20, 0x6d, 0x79, 0x20,
+            0x65, 0x79, 0x65, 0x0a, 0x53, 0x6f, 0x20, 0x79, 0x6f, 0x75,
+            0x20, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x20, 0x79, 0x6f, 0x75,
+            0x20, 0x63, 0x61, 0x6e, 0x20, 0x6c, 0x6f, 0x76, 0x65, 0x20,
+            0x6d, 0x65, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x6c, 0x65, 0x61,
+            0x76, 0x65, 0x20, 0x6d, 0x65, 0x20, 0x74, 0x6f, 0x20, 0x64,
+            0x69, 0x65, 0x0a, 0x4f, 0x68, 0x20, 0x62, 0x61, 0x62, 0x79,
+            0x20, 0x2d, 0x20, 0x63, 0x61, 0x6e, 0x27, 0x74, 0x20, 0x64,
+            0x6f, 0x20, 0x74, 0x68, 0x69, 0x73, 0x20, 0x74, 0x6f, 0x20,
+            0x6d, 0x65, 0x20, 0x62, 0x61, 0x62, 0x79, 0x0a, 0x4a, 0x75,
+            0x73, 0x74, 0x20, 0x67, 0x6f, 0x74, 0x74, 0x61, 0x20, 0x67,
+            0x65, 0x74, 0x20, 0x6f, 0x75, 0x74, 0x20, 0x2d, 0x20, 0x6a,
+            0x75, 0x73, 0x74, 0x20, 0x67, 0x6f, 0x74, 0x74, 0x61, 0x20,
+            0x67, 0x65, 0x74, 0x20, 0x72, 0x69, 0x67, 0x68, 0x74, 0x20,
+            0x6f, 0x75, 0x74, 0x74, 0x61, 0x20, 0x68, 0x65, 0x72, 0x65];
+
+        let mut output = [0u8; 200];
+        decode_and_compare(original, &encoded, &mut output)
+    }
 }
+
