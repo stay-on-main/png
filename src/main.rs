@@ -152,7 +152,10 @@ fn huffman_read_length(code: u16, stream: &mut BitStream) -> usize {
 fn huffman_read_distance(stream: &mut BitStream) -> usize
 {
     let i = stream.read(5) as usize;
-    (stream.read(YYY[i].bits as usize) + YYY[i].len) as usize
+    stream.set_static_huffman_bit_order(false);
+    let distance = (stream.read(YYY[i].bits as usize) + YYY[i].len) as usize;
+    stream.set_static_huffman_bit_order(true);
+    distance
 }
 
 fn huffman_copy_pair(length: usize, distance: usize, buf: &mut [u8], buf_pos: &mut usize)
