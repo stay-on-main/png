@@ -429,7 +429,7 @@ fn dynamic_huffman_decode(stream: &mut BitStream, output: &mut [u8]) -> Option<u
     }
 }
 
-fn decode(input: &[u8], output: &mut [u8]) -> Option<usize>
+pub fn decode(input: &[u8], output: &mut [u8]) -> Option<usize>
 {
     let mut count = 0;
 
@@ -478,7 +478,7 @@ fn decode(input: &[u8], output: &mut [u8]) -> Option<usize>
 
     Some(count)
 }
-
+/*
 fn main()
 {
     //let data: [u8; 11] = [0x73, 0x49, 0x4D, 0xCB, 0x49, 0x2C, 0x49, 0x55, 0x00, 0x11, 0x00];
@@ -508,7 +508,7 @@ fn main()
         }
     }
 }
-
+*/
 #[cfg(test)]
 mod tests {
     use super::*;
