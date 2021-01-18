@@ -375,11 +375,7 @@ fn dynamic_huffman_decode(stream: &mut BitStream, output: &mut [u8]) -> Option<u
                 }
             },
             16 => {
-                let count = match stream.read(2) {
-                    0b00 => 3,
-                    0b11 => 6,
-                    _ => return None,
-                };
+                let count = stream.read(2) as usize + 3;
                 
                 for _ in 0..count {
                     if !dict.put_last() {
